@@ -1,4 +1,5 @@
-import pymysql, gspread
+import pymysql
+import gspread
 import pandas as pd
 import datetime
 from google.oauth2.service_account import Credentials
@@ -13,20 +14,6 @@ def get_conn():
         cursorclass=pymysql.cursors.DictCursor
     )
     return conn
-
-# 유저가 없으면 생성
-def create_user_if_not_exists(conn):
-    with conn.cursor() as cur:
-        try:
-            # 유저가 존재하지 않으면 생성
-            cur.execute("CREATE USER IF NOT EXISTS 'your_user'@'%' IDENTIFIED BY 'your_password';")
-            cur.execute("GRANT ALL PRIVILEGES ON *.* TO 'your_user'@'%';")
-            cur.execute("FLUSH PRIVILEGES;")
-            conn.commit()
-            print("✅ 유저 'your_user' 생성 및 권한 부여 완료")
-        except Exception as e:
-            print(f"유저 생성 중 오류 발생: {e}")
-            conn.rollback()
   
 # DB가 없으면 생성
 def create_database_if_not_exists(conn):
@@ -122,73 +109,39 @@ def get_ws(sheet_key, sheet_name):
 
 
 # 토탈로그 확인 후 동기화
-def sync_total_log(conn):
-    df = pd.DataFrame(get_ws('1LVTv2lvjvRcksZFo8sTY6Fr-y_kVYdHUIsz7VgSbx3g', 'Total_log').get_all_records())
-    df = df.where(pd.notnull(df), None)
-    df = df.replace('', None)
+def ensure_total_log_table_exists(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS Total_log (
+            timestamp DATETIME,
+            user_id VARCHAR(100),
+            id_code VARCHAR(64),
+            name VARCHAR(64),
+            input TEXT,
+            type VARCHAR(64),
+            select_path TEXT,
+            bot_response TEXT,
+            PRIMARY KEY (timestamp, name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
 
-    with conn.cursor() as cur:
-        ensure_table_exists(cur, 'Total_log', create_total_log_table())
-        for row in df.to_dict(orient='records'):
-            cur.execute("""
-                REPLACE INTO Total_log (
-                    timestamp, user_id, id_code, name,
-                    input, type, select_path, bot_response
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                safe_datetime(row.get('timestamp')),
-                row.get('user_id'),
-                row.get('id_code'),
-                row.get('name'),
-                row.get('input'),
-                row.get('type'),
-                row.get('select_path'),
-                row.get('bot_response')
-            ))
-    conn.commit()
-    print("✅ Total_log → 'Total_log' 테이블 동기화 완료")
-
-
-
-    for sheet_name, table_name in sheet_table_map.items():
-        try:
-            print(f"[INFO] 유저 로그 시트 동기화 중: {sheet_name}")
-            df = pd.DataFrame(get_ws(sheet_key, sheet_name).get_all_records())
-            df = df.where(pd.notnull(df), None)
-
-            with conn.cursor() as cur:
-                for _, row in df.iterrows():
-                    if table_name == 'bot_input':
-                        timestamp = safe_datetime(row.get('timestamp'))
-                        bot_response = row.get('bot_response')
-
-                        if timestamp is None or bot_response is None:
-                            continue
-
-                        cur.execute("""
-                            REPLACE INTO bot_input (timestamp, bot_response)
-                            VALUES (%s, %s)
-                        """, (timestamp, bot_response))
-
-                    elif table_name == '관리자_log':
-                        name = row.get('name')
-                        user_id = row.get('user_id')
-                        message = row.get('message')
-                        timestamp = safe_datetime(row.get('timestamp'))
-
-                        if None in [name, user_id, message, timestamp]:
-                            continue
-
-                        cur.execute("""
-                            REPLACE INTO 관리자_log (name, user_id, message, timestamp)
-                            VALUES (%s, %s, %s, %s)
-                        """, (name, user_id, message, timestamp))
-
-                conn.commit()
-            print(f"✅ {sheet_name} 테이블 동기화 완료")
-
-        except Exception as e:
-            print(f"[ERROR] {sheet_name} 처리 실패: {e}")
+def ensure_auth_table_exists(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS auth (
+            id_code VARCHAR(64) PRIMARY KEY,
+            name VARCHAR(64),
+            userId VARCHAR(100),
+            job VARCHAR(64),
+            height FLOAT,
+            attention INT,
+            power INT,
+            obs INT,
+            luck INT,
+            wilpower INT,
+            coin INT,
+            gain_path TEXT,
+            auth_time DATETIME
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
 
 def sync_auth(conn):
     df = pd.DataFrame(get_ws('1gF10CYj794dZtHdepRz-78VgpUEWlweKX6bEfA3Fa8w', '인증').get_all_records())
@@ -233,6 +186,24 @@ def sync_auth(conn):
     conn.commit()
     print("✅ 인증 시트 → 'auth' 테이블 동기화 완료")
 
+def ensure_josa_table_exists(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS 조사 (
+            선택경로 TEXT,
+            장소1 TEXT,
+            장소2 TEXT,
+            장소3 TEXT,
+            장소4 TEXT,
+            장소5 TEXT,
+            타겟 TEXT,
+            조건 TEXT,
+            조건2 TEXT,
+            조건3 TEXT,
+            출력지문 TEXT,
+            선택지 TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
+
 def sync_josa(conn):
     df = pd.DataFrame(get_ws('1gF10CYj794dZtHdepRz-78VgpUEWlweKX6bEfA3Fa8w', '조사').get_all_records())
     df = df.where(pd.notnull(df), None)
@@ -254,14 +225,43 @@ def sync_josa(conn):
     conn.commit()
     print("✅ 조사(josa) 테이블 초기화 후 동기화 완료")
 
+def ensure_random_table_exists(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS 랜덤 (
+            `SELECT 답변 리스트` TEXT,
+            `랜덤 키워드` VARCHAR(255)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
+
+def sync_random(conn):
+    df = pd.DataFrame(get_ws('1AKF6DY4JatQCQcbatcjPqEyez-yk17X9SwFgZHrBPao', '랜덤').get_all_records())
+    df = df.where(pd.notnull(df), None).replace('', None)
+
+    with conn.cursor() as cur:
+        ensure_random_table_exists(cur)
+        cur.execute("DELETE FROM 랜덤")
+        for row in df.to_dict(orient='records'):
+            cur.execute("""
+                INSERT INTO 랜덤 (`SELECT 답변 리스트`, `랜덤 키워드`)
+                VALUES (%s, %s)
+            """, (
+                row.get('SELECT 답변 리스트'),
+                row.get('랜덤 키워드')
+            ))
+    conn.commit()
+    print("✅ 랜덤 시트 → '랜덤' 테이블 동기화 완료")
+
+
 def run():
     conn = get_conn()
     try:
-        sync_total_log(conn)
-#        sync_user_logs(conn)
+        with conn.cursor() as cur:
+            ensure_total_log_table_exists(cur)
+            ensure_random_table_exists(cur)
         sync_auth(conn)
         sync_josa(conn)
-        print("🎉 전체 로그 및 인증, 조사 시트 동기화 완료")
+        sync_random(conn)
+        print("🎉 인증, 조사, 랜덤 시트 동기화 완료 및 테이블 확인 완료")
     finally:
         conn.close()
 
